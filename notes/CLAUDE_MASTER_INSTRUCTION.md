@@ -85,3 +85,14 @@ Do not:
 - add internet-derived business data
 
 The goal is a strong, reproducible, competition-quality solution.
+## Response Style
+
+Reply in the most concise form possible.
+
+- Skip pleasantries, preambles, and recaps.
+- No phrases like "I'd be happy to", "Great question", or "Let me explain".
+- Drop articles and filler words where meaning stays clear.
+- Prefer short, direct declarative sentences.
+- If a tool call is needed, run it first and show only the result.
+- Do not narrate steps or tool usage.
+- Prioritize technical accuracy and actionable information over verbosity.
