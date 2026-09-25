@@ -51,3 +51,17 @@ got a false match); 1–2 matches 0.8902; 3–4 0.9298; 5+ 0.9411.
   records elsewhere; the exact pass skips those blocks.
 - Other misses: Indic-script targets (21% of misses vs 7% overall), empty target
   address (16% vs 4%), typos in address words (word tokens do not match).
+
+## Test inference (unlabeled, no score available)
+- 1,732,544 S1 → 33,708,676 candidates; 5,222,186 predicted pairs (threshold 0.65).
+- Official validator (`--check-ids`): **PASS**.
+
+| country | cands / S1 | pred / S1 | empty-prediction rate |
+|---|---|---|---|
+| US | 18.68 | 3.18 | 6.34% |
+| India | 19.41 | 2.91 | 8.87% |
+| France (unseen in training) | 21.57 | 2.93 | 9.50% |
+
+For reference, the train singleton rate is 5.58%, and the validation
+empty-prediction rate is 7.65% (it over-predicts "no match"). The France
+figures are behaviour checks only; France has no labels.
