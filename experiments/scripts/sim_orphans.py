@@ -30,9 +30,15 @@ P_COLS = ["s1_row", "t_row", "s2", "cos_name", "cos_addr"]
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--drop", type=float, nargs="+", default=[0.0, 0.19, 0.30])
+    ap.add_argument("--m3-name", default=None)
     a = ap.parse_args()
     wd = work_dir()
     M = StackModels.load_dir(models_dir())
+    if getattr(a, "m3_name", None):  # evaluate a candidate M3 variant (work/models/<name>.txt)
+        import lightgbm as lgb
+        M.m3 = lgb.Booster(model_file=str(wd / "models" / f"{a.m3_name}.txt"))
+        info = json.loads((wd / "exp" / f"{a.m3_name}.json").read_text())
+        M.m3_thr, M.m3_cut = info["val"]["threshold"], info["min_p1"]
     d = wd / "heldout" / "val"
     own = [pd.read_parquet(f) for f in sorted(glob.glob(str(d / "P_*.parquet")))]
     offs = np.r_[0, np.cumsum([len(x) for x in own])]
@@ -90,7 +96,7 @@ def main() -> None:
                          "India": round(float(per[cty == "India"].mean()), 5), "US": round(float(per[cty == "US"].mean()), 5)}
         res[f"drop={f}"] = {"removed_competitor_S1": int(len(gone)), **out}
         print(f, json.dumps(res[f"drop={f}"]), flush=True)
-    (wd / "shift" / "orphan_sim.json").write_text(json.dumps(res, indent=1))
+    (wd / "shift" / f"orphan_sim_{a.m3_name or 'M3'}.json").write_text(json.dumps(res, indent=1))
 
 
 if __name__ == "__main__":

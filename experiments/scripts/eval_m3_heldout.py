@@ -47,12 +47,18 @@ def main() -> None:
     ap.add_argument("--role", choices=["val", "rest"], required=True)
     ap.add_argument("--phase", choices=["A", "B"], required=True)
     ap.add_argument("--batch", type=int, default=60_000)
+    ap.add_argument("--m3-name", default=None, help="phase B only: evaluate a candidate M3 variant")
     a = ap.parse_args()
     t0 = time.time()
     wd = work_dir()
     out = wd / "heldout" / a.role
     out.mkdir(parents=True, exist_ok=True)
     M = StackModels.load(wd)
+    if a.m3_name:  # evaluate a candidate M3 variant (work/models/<name>.txt)
+        import lightgbm as lgb
+        M.m3 = lgb.Booster(model_file=str(wd / "models" / f"{a.m3_name}.txt"))
+        info = json.loads((wd / "exp" / f"{a.m3_name}.json").read_text())
+        M.m3_thr, M.m3_cut = info["val"]["threshold"], info["min_p1"]
 
     if a.phase == "A":
         s1, tg = prepared("train")
@@ -131,7 +137,7 @@ def main() -> None:
     res["delta_M3_vs_M2E"] = {"mean": float(d.mean()), "ci95": [float(np.percentile(bs, 2.5)), float(np.percentile(bs, 97.5))]}
     res["runtime_phaseB_s"] = time.time() - t0
     res["peak_rss_phaseB_gb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2
-    (out / "result.json").write_text(json.dumps(res, indent=1))
+    (out / f"result_{a.m3_name or 'M3'}.json").write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
 
 
