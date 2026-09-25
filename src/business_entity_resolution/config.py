@@ -26,6 +26,11 @@ def work_dir() -> Path:
     return p
 
 
+def models_dir() -> Path:
+    """Frozen production models (shipped in the repo; override with BER_MODELS)."""
+    return Path(os.environ.get("BER_MODELS", REPO_ROOT / "models"))
+
+
 def out_dir() -> Path:
     p = Path(os.environ.get("BER_OUT", REPO_ROOT / "output"))
     p.mkdir(parents=True, exist_ok=True)

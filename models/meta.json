@@ -1,0 +1,25 @@
+{
+ "M1b": {
+  "best_iteration": 131
+ },
+ "M2": {
+  "cascade": 0.01,
+  "threshold": 0.675
+ },
+ "M1bE": {
+  "best_iteration": 126
+ },
+ "M2E": {
+  "cascade": 0.01,
+  "threshold": 0.65
+ },
+ "M3": {
+  "cascade": 0.01,
+  "threshold": 0.6
+ },
+ "validation_macro_f05": {
+  "M1b": 0.9363277275685896,
+  "M2E": 0.9518023090692032,
+  "M3": 0.9587133687255488
+ }
+}

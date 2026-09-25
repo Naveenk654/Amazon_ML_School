@@ -29,22 +29,38 @@ Do not use external business identity lookup, geocoding, government registries,
 commercial entity-resolution APIs, or internet-based entity augmentation.
 Use the provided data and permitted ML/NLP techniques only.
 
-## Running the baseline
+## Production inference (frozen M3 stack)
 
 ```bash
-pip install -r requirements.txt
-export BER_DATA=/path/to/dataset      # contains train/ and test/ TSVs (not committed)
-export BER_WORK=/path/to/cache        # normalized parquet, model, reports
+pip install -r requirements.txt            # + indic-transliteration only for the diagnostics
+export BER_DATA=/path/to/dataset          # contains train/ and test/ TSVs (not committed)
+export BER_WORK=/path/to/cache            # normalized parquet + inference staging
 export PYTHONPATH=src
 
-python -m business_entity_resolution.pipeline validate   # S1-grouped labeled validation
-python -m business_entity_resolution.pipeline predict    # writes output/matching_results.tsv
-                                                          #        output/candidate_pairs.tsv
+python -m business_entity_resolution.pipeline predict      # phase A + B -> output/*.tsv
 python3 utils/validate_submission.py --matching output/matching_results.tsv \
-    --candidate output/candidate_pairs.tsv --test-dir $BER_DATA/test
+    --candidate output/candidate_pairs.tsv --test-dir $BER_DATA/test --check-ids
 ```
 
-Pipeline: `normalize` → `blocking` (3 passes: exact core-name key, name TF-IDF
-top-k, address TF-IDF top-k, all within country) → candidate union →
-`features` → LightGBM matcher → threshold decision (empty list = no match) →
-submission. `candidate_pairs.tsv` is exactly the set the matcher scores.
+The frozen models are in `models/` (LightGBM text files + `meta.json` with
+iterations, cascade cut-offs and thresholds; ~5 MB).
+
+Pipeline (`src/business_entity_resolution/stack.py`), per test S1 batch (phase A):
+1. `normalize`: country-agnostic name/address normalization.
+2. `blocking` (C): exact core-name key, name TF-IDF top-10, address TF-IDF
+   top-10, and hybrid name+address top-10 for common names, all within country.
+3. **M1b** pairwise LightGBM → sibling features → **M2** second stage.
+4. `expansion`: top-5 hybrid neighbours of each M2-predicted target (M4-NE).
+5. Features over the enlarged set → **M1b-E** → siblings → **M2-E** (score s2).
+
+Phase B (all S1 at once): `competition`: cross-S1 competition features (each
+target vs the other S1 holding it) → **M3** → threshold 0.60 → submission.
+`candidate_pairs.tsv` is exactly the pair set scored by the stack.
+
+Validation (EXP001 fold, 200k S1): macro F0.5 0.95871 (C baseline 0.93462).
+Experiment history: `experiments/`. Training scripts: `experiments/scripts/`.
+
+## Baseline (EXP001, historical)
+
+`python -m business_entity_resolution.pipeline validate` reproduces the first
+baseline (0.9246).

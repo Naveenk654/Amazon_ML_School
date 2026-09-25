@@ -18,7 +18,7 @@ import pandas as pd
 
 from . import evaluate as ev
 from .blocking import PASSES, Blocker
-from .config import BlockingConfig, ModelConfig, ValidationConfig, SEED, out_dir, work_dir
+from .config import BlockingConfig, ModelConfig, ValidationConfig, SEED, models_dir, out_dir, work_dir
 from .data import assign_folds, load_ground_truth, load_sources
 from .features import build_features
 from .inference import decide, tune_threshold, write_lists_rows
@@ -198,54 +198,113 @@ def error_decomposition(pv, tpv, pred, truth, ids) -> dict:
 
 
 def cmd_predict(args) -> None:
-    import lightgbm as lgb
+    """Test inference with the frozen M3 stack (see stack.py).
 
-    wd = work_dir()
-    model = lgb.Booster(model_file=str(wd / "baseline_model.txt"))
-    thr = json.loads((wd / "baseline_threshold.json").read_text())["threshold"]
+    Phase A (this process): every test S1, in batches, through blocking ->
+    M1b -> M2 -> neighbour expansion -> M1b-E -> M2-E; stores all scored pairs
+    and the stage-3 input rows. Phase B (fresh process, for memory): cross-S1
+    competition features over ALL pairs -> M3 -> submission files.
+    """
+    if args.phase in ("all", "A"):
+        predict_phase_a(args)
+    if args.phase == "all":
+        import subprocess
+        import sys
+        subprocess.run([sys.executable, "-m", "business_entity_resolution.pipeline", "predict", "--phase", "B"],
+                       check=True)
+    elif args.phase == "B":
+        predict_phase_b(args)
+
+
+P_COLS = ["s1_row", "t_row", "s2", "cos_name", "cos_addr"]
+
+
+def _stage_dir():
+    d = work_dir() / "test_stage"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def predict_phase_a(args) -> None:
+    import resource
+
+    from .stack import StackModels, score_batch
+
+    t0 = time.time()
+    d = _stage_dir()
+    for f in d.glob("*.parquet"):
+        f.unlink()
+    M = StackModels.load_dir(models_dir())
     s1, tg = prepared("test")
     s1f, tf = key_freqs(s1, tg)
-    blocker = Blocker(tg, BlockingConfig())
-    # Score S1 in batches so features for ~35M test pairs never coexist in memory.
-    kept = []
-    for lo in range(0, len(s1), args.batch):
-        rows = np.arange(lo, min(lo + args.batch, len(s1)))
-        cand = generate(blocker, s1, tg, rows)
-        X = build_features(cand, s1, tg, s1f, tf)
-        kept.append(pd.DataFrame({"s1_row": cand["s1_row"].to_numpy().astype(np.int32),
-                                  "t_row": cand["t_row"].to_numpy().astype(np.int32),
-                                  "score": model_predict(model, X).astype(np.float32)}))
-        del cand, X
-    del blocker
-    cand = pd.concat(kept, ignore_index=True)
+    blocker = Blocker(tg, BlockingConfig(hybrid=True))
+    rows_all = np.arange(len(s1))
+    n_pairs = 0
+    for i, lo in enumerate(range(0, len(s1), args.batch)):
+        e, keep = score_batch(blocker, s1, tg, s1f, tf, rows_all[lo:lo + args.batch], M, stage3=True)
+        e[P_COLS].to_parquet(d / f"P_{i:03d}.parquet", index=False)
+        keep.to_parquet(d / f"XS3_{i:03d}.parquet", index=False)
+        n_pairs += len(e)
+        log.info("batch %d: S1 %d-%d -> %d pairs (%.0fs)", i, lo, min(lo + args.batch, len(s1)), len(e), time.time() - t0)
+    meta = {"n_s1": len(s1), "pairs": n_pairs, "runtime_s": time.time() - t0,
+            "peak_rss_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2}
+    (d / "phaseA.json").write_text(json.dumps(meta, indent=1))
+    log.info("phase A done %s", meta)
+
+
+def predict_phase_b(args) -> None:
+    import resource
+
+    from .stack import StackModels, stage3_scores
+
+    t0 = time.time()
+    d = _stage_dir()
+    M = StackModels.load_dir(models_dir())
+    files = sorted(d.glob("P_*.parquet"))
+    parts = [pd.read_parquet(f) for f in files]
+    offs = np.r_[0, np.cumsum([len(p) for p in parts])]
+    P = pd.concat(parts, ignore_index=True)
+    del parts
+    XS3 = []
+    for i, f in enumerate(files):
+        x = pd.read_parquet(str(f).replace("P_", "XS3_"))
+        x["row"] = x["row"].to_numpy() + offs[i]
+        XS3.append(x)
+    XS3 = pd.concat(XS3, ignore_index=True)
+    s1 = pd.read_parquet(work_dir() / "test_s1_norm.parquet", columns=["entity_id", "country", "name_key"])
+    tg_ids = pd.read_parquet(work_dir() / "test_t_norm.parquet", columns=["entity_id"])["entity_id"].to_numpy()
+    final = stage3_scores(P, pd.factorize(s1["name_key"])[0], XS3, M)
+    del XS3
     od = out_dir()
     ids = s1["entity_id"].to_numpy()
-    t_ids = tg["entity_id"].to_numpy()
-    sr, tr = cand["s1_row"].to_numpy(), cand["t_row"].to_numpy()
-    keep = cand["score"].to_numpy() >= thr
-    # candidate_pairs.tsv = exactly the set scored by the matcher
-    write_lists_rows(od / "candidate_pairs.tsv", ids, sr, t_ids, tr, "candidate_entity_ids")
-    write_lists_rows(od / "matching_results.tsv", ids, sr[keep], t_ids, tr[keep], "matched_entity_ids")
+    sr, tr = P["s1_row"].to_numpy(), P["t_row"].to_numpy()
+    keep = final >= M.m3_thr
+    # candidate_pairs.tsv = exactly the set scored by the matcher stack
+    write_lists_rows(od / "candidate_pairs.tsv", ids, sr, tg_ids, tr, "candidate_entity_ids")
+    write_lists_rows(od / "matching_results.tsv", ids, sr[keep], tg_ids, tr[keep], "matched_entity_ids")
     country = s1["country"].to_numpy()
     n_c = np.bincount(sr, minlength=len(ids))
     n_p = np.bincount(sr[keep], minlength=len(ids))
-    stats = {"s1": len(ids), "candidates": len(cand), "threshold": thr, "pred_pairs": int(keep.sum()),
-             "empty_pred_rate": float((n_p == 0).mean()), "by_country": {}}
+    stats = {"model": "M3", "threshold": M.m3_thr, "s1": len(ids), "candidates": len(P),
+             "pred_pairs": int(keep.sum()), "empty_pred_rate": float((n_p == 0).mean()),
+             "zero_candidate_s1": int((n_c == 0).sum()), "by_country": {},
+             "runtime_s": time.time() - t0,
+             "peak_rss_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2}
     for c in pd.unique(country):
         m = country == c
         stats["by_country"][str(c)] = {"s1": int(m.sum()), "cands_per_s1": float(n_c[m].mean()),
-                                       "zero_cand_rate": float((n_c[m] == 0).mean()),
                                        "pred_per_s1": float(n_p[m].mean()),
                                        "empty_pred_rate": float((n_p[m] == 0).mean())}
-    (wd / "test_inference_stats.json").write_text(json.dumps(stats, indent=1))
-    log.info("test stats: %s", json.dumps(stats))
+    (work_dir() / "test_inference_stats.json").write_text(json.dumps(stats, indent=1))
+    log.info("phase B done %s", json.dumps(stats))
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["validate", "predict"])
-    ap.add_argument("--batch", type=int, default=300_000, help="S1 rows per scoring batch")
+    ap.add_argument("--batch", type=int, default=60_000, help="S1 rows per scoring batch")
+    ap.add_argument("--phase", choices=["all", "A", "B"], default="all", help="predict: run phase A, B or both")
     args = ap.parse_args()
     {"validate": cmd_validate, "predict": cmd_predict}[args.cmd](args)
 
