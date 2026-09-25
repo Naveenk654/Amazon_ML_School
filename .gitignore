@@ -15,3 +15,7 @@ data/test/*.tsv
 experiments/*.csv
 experiments/*.json
 experiments/*.parquet
+
+# Caches and generated submissions
+work/
+output/*.tsv
