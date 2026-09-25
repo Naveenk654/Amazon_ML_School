@@ -73,6 +73,17 @@ def within_country_space(s1_sub: pd.DataFrame, tg: pd.DataFrame) -> tuple[float,
     return within, float(len(s1_sub)) * len(tg)
 
 
+def make_roles(s1: pd.DataFrame, n_match: np.ndarray, vcfg: ValidationConfig) -> dict:
+    """S1 row positions per role; deterministic so experiments reuse EXP001's split."""
+    fold = assign_folds(s1, n_match, vcfg.n_folds)
+    rng = np.random.default_rng(SEED)
+    return {
+        "train": rng.permutation(np.flatnonzero(np.isin(fold, vcfg.train_folds)))[: vcfg.n_train],
+        "tune": rng.permutation(np.flatnonzero(fold == vcfg.tune_fold))[: vcfg.n_tune],
+        "val": rng.permutation(np.flatnonzero(fold == vcfg.val_fold))[: vcfg.n_val],
+    }
+
+
 def cmd_validate(args) -> None:
     bcfg, vcfg, mcfg = BlockingConfig(), ValidationConfig(), ModelConfig()
     s1, tg = prepared("train")
@@ -81,15 +92,7 @@ def cmd_validate(args) -> None:
     gt_s1 = pd.Index(s1["entity_id"]).get_indexer(gt["s1_id"])
     gt_t = pd.Index(tg["entity_id"]).get_indexer(gt["t_id"])
     assert (gt_s1 >= 0).all() and (gt_t >= 0).all()
-    n_match = np.bincount(gt_s1, minlength=len(s1))
-    fold = assign_folds(s1, n_match, vcfg.n_folds)
-
-    rng = np.random.default_rng(SEED)
-    roles = {
-        "train": rng.permutation(np.flatnonzero(np.isin(fold, vcfg.train_folds)))[: vcfg.n_train],
-        "tune": rng.permutation(np.flatnonzero(fold == vcfg.tune_fold))[: vcfg.n_tune],
-        "val": rng.permutation(np.flatnonzero(fold == vcfg.val_fold))[: vcfg.n_val],
-    }
+    roles = make_roles(s1, np.bincount(gt_s1, minlength=len(s1)), vcfg)
     all_rows = np.sort(np.concatenate(list(roles.values())))
     in_roles = np.isin(gt_s1, all_rows)
     gt = gt[in_roles].reset_index(drop=True)

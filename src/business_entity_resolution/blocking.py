@@ -27,6 +27,9 @@ from .config import N_JOBS, BlockingConfig
 log = logging.getLogger(__name__)
 
 PASSES = ("name_exact", "name_tfidf", "addr_tfidf")
+# Experimental passes (Phase 4A). Off by default; their flags are reported for
+# blocking analysis but are NOT matcher features (the EXP001 model is unchanged).
+EXTRA_PASSES = ("x_char_name", "x_hybrid", "x_addr_expand", "x_empty_addr_name")
 
 
 def name_doc(df: pd.DataFrame) -> list[str]:
@@ -47,10 +50,11 @@ class TfidfIndex:
 
     N_FEATURES = 2 ** 24
 
-    def __init__(self, target_docs: list[str], max_df: int):
-        self.hv = HashingVectorizer(analyzer=str.split, n_features=self.N_FEATURES,
-                                    alternate_sign=False, norm=None, binary=True,
-                                    dtype=np.float32)
+    def __init__(self, target_docs: list[str], max_df: int, char_ngrams: int = 0):
+        kw = (dict(analyzer="char_wb", ngram_range=(char_ngrams, char_ngrams))
+              if char_ngrams else dict(analyzer=str.split))
+        self.hv = HashingVectorizer(n_features=self.N_FEATURES, alternate_sign=False,
+                                    norm=None, binary=True, dtype=np.float32, **kw)
         X = self.hv.transform(target_docs).tocsr()
         df = np.bincount(X.indices, minlength=self.N_FEATURES)
         n = X.shape[0]
@@ -71,20 +75,6 @@ class TfidfIndex:
 
     def transform(self, docs: list[str]) -> sp.csr_matrix:
         return self._weight(self.hv.transform(docs).tocsr())
-
-    def topk(self, Q: sp.csr_matrix, k: int, min_score: float, chunk: int):
-        out_i, out_j, out_s, out_r = [], [], [], []
-        for a in range(0, Q.shape[0], chunk):
-            C = sp_matmul_topn(Q[a:a + chunk], self.TT, top_n=k, threshold=min_score,
-                               sort=True, n_threads=N_JOBS).tocsr()
-            cnt = np.diff(C.indptr)
-            out_i.append(np.repeat(np.arange(C.shape[0]) + a, cnt))
-            out_j.append(C.indices.astype(np.int64))
-            out_s.append(C.data)
-            # rank within row (results are sorted, best first)
-            out_r.append(np.arange(C.nnz) - np.repeat(C.indptr[:-1], cnt))
-        return (np.concatenate(out_i), np.concatenate(out_j),
-                np.concatenate(out_s), np.concatenate(out_r))
 
 
 def pair_cosine(Q: sp.csr_matrix, T: sp.csr_matrix, qi: np.ndarray, tj: np.ndarray,
@@ -107,20 +97,47 @@ class Blocker:
         for c, idx in targets.groupby("country").indices.items():
             sub = targets.iloc[idx]
             log.info("fit indexes country=%s targets=%d", c, len(idx))
-            self.by_country[c] = dict(
+            m = dict(
                 idx=idx,
                 name=TfidfIndex(name_doc(sub), cfg.name_max_df),
                 addr=TfidfIndex(addr_doc(sub), cfg.addr_max_df),
                 key_counts=sub["name_key"].value_counts(),
+                addr_empty=sub["addr_empty"].to_numpy(),
             )
+            if cfg.char_name:
+                m["char"] = TfidfIndex(sub["name_core"].tolist(), cfg.char_max_df, char_ngrams=3)
+            if cfg.hybrid:
+                # [name | w*addr] stacked: dot product = cos_name + w * cos_addr
+                m["hybrid_TT"] = sp.vstack([m["name"].TT, m["addr"].TT]).tocsr()
+            self.by_country[c] = m
+
+    @staticmethod
+    def _topk_frame(TT, Q, k, cfg, code, rows=None):
+        C_i, C_j, C_r = [], [], []
+        for a in range(0, Q.shape[0], cfg.chunk_rows):
+            C = sp_matmul_topn(Q[a:a + cfg.chunk_rows], TT, top_n=k, threshold=cfg.min_score,
+                               sort=True, n_threads=N_JOBS).tocsr()
+            cnt = np.diff(C.indptr)
+            C_i.append(np.repeat(np.arange(C.shape[0]) + a, cnt))
+            C_j.append(C.indices)
+            C_r.append(np.arange(C.nnz) - np.repeat(C.indptr[:-1], cnt))
+        i = np.concatenate(C_i) if C_i else np.array([], np.int64)
+        if rows is not None:
+            i = rows[i]
+        return pd.DataFrame({"qi": i.astype(np.int32),
+                             "tj": (np.concatenate(C_j) if C_j else i).astype(np.int32),
+                             "pass": np.int8(code),
+                             "rank": (np.concatenate(C_r) if C_r else i).astype(np.int16)})
 
     def candidates(self, s1: pd.DataFrame) -> pd.DataFrame:
-        """Union of all passes for the given S1 rows.
+        """Union of all enabled passes for the given S1 rows.
 
         Returns one row per (s1 row position, target row position) with a
-        boolean flag and rank per pass plus both TF-IDF cosines for every pair.
+        boolean flag per pass, ranks for the baseline passes, and both TF-IDF
+        cosines for every pair.
         """
         cfg = self.cfg
+        all_passes = PASSES + EXTRA_PASSES
         frames = []
         for c, qidx in s1.groupby("country").indices.items():
             if c not in self.by_country:
@@ -128,31 +145,61 @@ class Blocker:
             m = self.by_country[c]
             q = s1.iloc[qidx]
             tkeys = self.tg["name_key"].to_numpy()[m["idx"]]
+            qkeys = q["name_key"].to_numpy()
+            # target frequency of the S1 name key (unsupervised "commonness")
+            freq = m["key_counts"].reindex(qkeys).fillna(0).to_numpy()
             parts = []
             # pass 1: exact core-name key, skipping oversized blocks
             ok = m["key_counts"][m["key_counts"] <= cfg.exact_max_block].index
-            lk = pd.DataFrame({"qi": np.arange(len(q)), "name_key": q["name_key"].to_numpy()})
-            lk = lk[lk["name_key"].isin(ok)]
+            lk = pd.DataFrame({"qi": np.arange(len(q)), "name_key": qkeys})
             rk = pd.DataFrame({"tj": np.arange(len(tkeys)), "name_key": tkeys})
-            ex = lk.merge(rk, on="name_key")[["qi", "tj"]].astype(np.int32)
-            ex["pass"] = 0
+            ex = lk[lk["name_key"].isin(ok)].merge(rk, on="name_key")[["qi", "tj"]].astype(np.int32)
+            ex["pass"] = np.int8(0)
             ex["rank"] = np.int16(0)
             parts.append(ex)
             # passes 2-3: TF-IDF top-k
             Qn = m["name"].transform(name_doc(q))
             Qa = m["addr"].transform(addr_doc(q))
-            for code, idx_, Q, k in ((1, m["name"], Qn, cfg.name_topk),
-                                      (2, m["addr"], Qa, cfg.addr_topk)):
-                i, j, s, r = idx_.topk(Q, k, cfg.min_score, cfg.chunk_rows)
-                parts.append(pd.DataFrame({"qi": i.astype(np.int32), "tj": j.astype(np.int32),
-                                           "pass": np.int8(code), "rank": r.astype(np.int16)}))
+            parts.append(self._topk_frame(m["name"].TT, Qn, cfg.name_topk, cfg, 1))
+            parts.append(self._topk_frame(m["addr"].TT, Qa, cfg.addr_topk, cfg, 2))
+            # A: adaptive name top-k (still the name_tfidf pass, deeper for common names)
+            for lo, k in cfg.adaptive_k:
+                rows = np.flatnonzero(freq >= lo)
+                if len(rows):
+                    parts.append(self._topk_frame(m["name"].TT, Qn[rows], k, cfg, 1, rows))
+            # B: char 3-gram name retrieval for common names
+            if cfg.char_name:
+                rows = np.flatnonzero(freq >= cfg.char_min_freq)
+                if len(rows):
+                    Qc = m["char"].transform(q["name_core"].iloc[rows].tolist())
+                    parts.append(self._topk_frame(m["char"].TT, Qc, cfg.char_topk, cfg, 3, rows))
+            # C: hybrid name+address retrieval for common names
+            if cfg.hybrid:
+                rows = np.flatnonzero(freq >= cfg.hybrid_min_freq)
+                if len(rows):
+                    Qh = sp.hstack([Qn[rows], cfg.hybrid_w_addr * Qa[rows]]).tocsr()
+                    parts.append(self._topk_frame(m["hybrid_TT"], Qh, cfg.hybrid_topk, cfg, 4, rows))
+            # D: address-ranked expansion inside the (skipped) exact-name block
+            if cfg.addr_expand:
+                sel = (freq > cfg.exact_max_block) & (freq <= cfg.expand_max_block) & (freq >= cfg.expand_min_freq)
+                parts += list(self._expand_by_address(lk[sel], rk, Qa, m["addr"].T, cfg))
+            # E1: same-key targets with EMPTY address (address passes can never find them)
+            if cfg.empty_addr_name:
+                sel = freq > cfg.exact_max_block
+                rk_e = rk[m["addr_empty"]]
+                e = lk[sel].merge(rk_e, on="name_key")[["qi", "tj"]]
+                e = e.groupby("qi").head(cfg.empty_addr_max).astype(np.int32)
+                e["pass"] = np.int8(6)
+                e["rank"] = np.int16(0)
+                parts.append(e)
+
             allp = pd.concat(parts, ignore_index=True)
             ranks = allp.groupby(["qi", "tj", "pass"])["rank"].min().unstack("pass")
-            ranks = ranks.reindex(columns=range(len(PASSES)))
-            ranks.columns = list(PASSES)
+            ranks = ranks.reindex(columns=range(len(all_passes)))
+            ranks.columns = list(all_passes)
             del allp, parts
-            u = ranks.add_prefix("rank_")
-            for p in PASSES:
+            u = ranks[list(PASSES)].add_prefix("rank_")
+            for p in all_passes:
                 u[p] = ranks[p].notna().to_numpy()
             u = u.reset_index()
             qi = u["qi"].to_numpy()
@@ -163,9 +210,19 @@ class Blocker:
             u["t_row"] = m["idx"][tj]
             frames.append(u.drop(columns=["qi", "tj"]))
             log.info("country=%s s1=%d candidates=%d", c, len(q), len(u))
-        cols = ["s1_row", "t_row", *PASSES, *[f"rank_{p}" for p in PASSES], "cos_name", "cos_addr"]
+        cols = ["s1_row", "t_row", *all_passes, *[f"rank_{p}" for p in PASSES], "cos_name", "cos_addr"]
         out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=cols)
-        for p in PASSES:
-            if f"rank_{p}" not in out:
-                out[f"rank_{p}"] = np.nan
         return out[cols]
+
+    @staticmethod
+    def _expand_by_address(lk, rk, Qa, Ta, cfg, chunk_s1: int = 20_000):
+        """For common-name S1s, rank every same-key target by address cosine, keep top-k."""
+        for a in range(0, len(lk), chunk_s1):
+            pr = lk.iloc[a:a + chunk_s1].merge(rk, on="name_key")[["qi", "tj"]]
+            if pr.empty:
+                continue
+            pr["s"] = pair_cosine(Qa, Ta, pr["qi"].to_numpy(), pr["tj"].to_numpy())
+            pr = pr[pr["s"] > 0].sort_values(["qi", "s"], ascending=[True, False])
+            pr = pr.groupby("qi").head(cfg.expand_topk)
+            yield pd.DataFrame({"qi": pr["qi"].to_numpy(np.int32), "tj": pr["tj"].to_numpy(np.int32),
+                                "pass": np.int8(5), "rank": np.int16(0)})

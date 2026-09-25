@@ -81,6 +81,27 @@ class BlockingConfig:
     addr_max_df: int = 20000
     min_score: float = 0.05
     chunk_rows: int = 200_000
+    # ---- Phase 4A experimental passes (all off = EXP001 baseline) ----
+    # A: extra name top-k for S1 whose name key has >= lo targets: ((lo, k), ...)
+    adaptive_k: tuple = ()
+    # B: char 3-gram name retrieval for common names
+    char_name: bool = False
+    char_min_freq: int = 51
+    char_topk: int = 10
+    char_max_df: int = 20000
+    # C: hybrid (name + w * address) retrieval for common names
+    hybrid: bool = False
+    hybrid_min_freq: int = 51
+    hybrid_topk: int = 10
+    hybrid_w_addr: float = 1.0
+    # D: address-ranked expansion inside the skipped exact-name block
+    addr_expand: bool = False
+    expand_min_freq: int = 51
+    expand_topk: int = 10
+    expand_max_block: int = 5000
+    # E1: same-key targets with an empty address, for common names
+    empty_addr_name: bool = False
+    empty_addr_max: int = 10
 
 
 @dataclass
