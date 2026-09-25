@@ -1,6 +1,7 @@
 """Expansion seed scores (stage-2 / M2-level) for every C shard, leak-free.
 
-    PYTHONPATH=src python experiments/scripts/seed_scores.py
+    PYTHONPATH=src python experiments/scripts/seed_scores.py                       # C / M2 -> seed_
+    PYTHONPATH=src python experiments/scripts/seed_scores.py --blocking CE --model M2E --prefix s2_
 
 train      : 4-fold out-of-fold M2 (same S1 folds as stage1_scores.py; each fold
              model = M2 configuration, M2's best iteration, cascade p1 >= min_p1,
@@ -11,6 +12,7 @@ Writes seed_XXX.parquet (column `seed`) next to each C cand_XXX.parquet.
 """
 from __future__ import annotations
 
+import argparse
 import glob
 import json
 import logging
@@ -33,12 +35,17 @@ def read_xs(cf, mask=None):
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--blocking", default="C")
+    ap.add_argument("--model", default="M2")
+    ap.add_argument("--prefix", default="seed_")
+    a = ap.parse_args()
     t0 = time.time()
     wd = work_dir()
-    base = wd / "matcher_data" / "C"
-    info = json.loads((wd / "exp" / "M2.json").read_text())
+    base = wd / "matcher_data" / a.blocking
+    info = json.loads((wd / "exp" / f"{a.model}.json").read_text())
     cut, rounds = info["min_p1"], int(info["best_iteration"])
-    m2 = lgb.Booster(model_file=str(wd / "models" / "M2.txt"))
+    m2 = lgb.Booster(model_file=str(wd / "models" / f"{a.model}.txt"))
     feats = m2.feature_name()
 
     for role in ("tune", "val"):
@@ -47,7 +54,7 @@ def main() -> None:
             m = p1 >= cut
             seed = p1.copy()
             seed[m] = m2.predict(read_xs(cf, m)[feats])
-            pd.DataFrame({"seed": seed.astype(np.float32)}).to_parquet(cf.replace("cand_", "seed_"), index=False)
+            pd.DataFrame({"seed": seed.astype(np.float32)}).to_parquet(cf.replace("cand_", a.prefix), index=False)
 
     files = sorted(glob.glob(f"{base}/train/cand_*.parquet"))
     s1r = [pd.read_parquet(f, columns=["s1_row"])["s1_row"].to_numpy() for f in files]
@@ -80,10 +87,10 @@ def main() -> None:
                 seeds[i][idx] = mdl.predict(X[sel])
         log.info("fold %d done (%.0fs)", k, time.time() - t0)
     for f, s in zip(files, seeds):
-        pd.DataFrame({"seed": s.astype(np.float32)}).to_parquet(f.replace("cand_", "seed_"), index=False)
+        pd.DataFrame({"seed": s.astype(np.float32)}).to_parquet(f.replace("cand_", a.prefix), index=False)
     meta = {"rounds": rounds, "cut": cut, "runtime_s": time.time() - t0,
             "peak_rss_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2}
-    (base / "seed_meta.json").write_text(json.dumps(meta, indent=1))
+    (base / f"{a.prefix}meta.json").write_text(json.dumps(meta, indent=1))
     log.info("done %s", meta)
 
 

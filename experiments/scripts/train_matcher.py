@@ -29,6 +29,13 @@ from business_entity_resolution.pipeline import make_roles
 log = logging.getLogger("train_matcher")
 
 
+CASCADE = "p1_"  # shard prefix holding the cascade score (set from --cascade-prefix)
+
+
+def cascade_score(cf):
+    return pd.read_parquet(cf.replace("cand_", CASCADE)).iloc[:, 0].to_numpy()
+
+
 def load_role(d, keep_s1=None, extra=(), min_p1=None, drop_prefix=None):
     """Load cand + features into one preallocated float32 array (no vstack copy).
 
@@ -40,7 +47,7 @@ def load_role(d, keep_s1=None, extra=(), min_p1=None, drop_prefix=None):
         c = pd.read_parquet(cf, columns=["s1_row", "t_row", "y"])
         m = np.isin(c["s1_row"].to_numpy(), keep_s1) if keep_s1 is not None else np.ones(len(c), bool)
         if min_p1 is not None:  # cascade: stage 2 only sees candidates with p1 >= min_p1
-            m &= pd.read_parquet(cf.replace("cand_", "p1_"))["p1"].to_numpy() >= min_p1
+            m &= cascade_score(cf) >= min_p1
         cands.append(c[m].reset_index(drop=True))
         masks.append(m)
     cols = list(pq.ParquetFile(files[0].replace("cand_", "X_")).schema_arrow.names)
@@ -97,7 +104,10 @@ def main() -> None:
     ap.add_argument("--min-p1", type=float, default=None,
                     help="cascade: rescore only candidates with stage-1 p1 >= this; others keep p1")
     ap.add_argument("--drop-prefix", default=None, help="drop feature columns with this prefix (ablation)")
+    ap.add_argument("--cascade-prefix", default="p1_", help="shard prefix of the cascade score (p1_, s2_, ...)")
     a = ap.parse_args()
+    global CASCADE
+    CASCADE = a.cascade_prefix
     t0 = time.time()
     wd = work_dir()
     base = wd / "matcher_data" / a.blocking
@@ -116,7 +126,7 @@ def main() -> None:
     ctr, Xtr, cols = load_role(base / "train", keep, a.extra, a.min_p1, a.drop_prefix)
     ctu, Xtu, _ = load_role(base / "tune", extra=a.extra, drop_prefix=a.drop_prefix)
     if a.min_p1 is not None:
-        p1_tu = np.concatenate([pd.read_parquet(f.replace("cand_", "p1_"))["p1"].to_numpy()
+        p1_tu = np.concatenate([cascade_score(f)
                                 for f in sorted(glob.glob(f"{base / 'tune'}/cand_*.parquet"))])
     log.info("train pairs %d (S1 %d), tune pairs %d", len(ctr), ctr["s1_row"].nunique(), len(ctu))
 
@@ -148,7 +158,7 @@ def main() -> None:
     cva, Xva, _ = load_role(base / "val", extra=a.extra, drop_prefix=a.drop_prefix)
     val_ids = np.sort(roles["val"])
     truth_va = ev.as_sets(gtr[np.isin(gs, val_ids)], "s1_row", "t_row")
-    p1_va = np.concatenate([pd.read_parquet(f.replace("cand_", "p1_"))["p1"].to_numpy()
+    p1_va = np.concatenate([cascade_score(f)
                             for f in sorted(glob.glob(f"{base / 'val'}/cand_*.parquet"))]) \
         if a.min_p1 is not None else None
     s_va = cascade_predict(model, Xva, p1_va, a.min_p1)
@@ -164,7 +174,7 @@ def main() -> None:
     res["ceiling"] = ev.macro_f05(ev.as_sets(cva[cva["y"] == 1], "s1_row", "t_row"), truth_va, val_ids)
 
     imp = pd.Series(model.feature_importance("gain"), index=model.feature_name())
-    out = {"name": a.name, "blocking": a.blocking, "extra": a.extra, "min_p1": a.min_p1, "drop_prefix": a.drop_prefix, "n_train_s1": int(len(keep) if keep is not None else len(roles["train"])),
+    out = {"name": a.name, "blocking": a.blocking, "extra": a.extra, "min_p1": a.min_p1, "cascade_prefix": a.cascade_prefix, "drop_prefix": a.drop_prefix, "n_train_s1": int(len(keep) if keep is not None else len(roles["train"])),
            "best_iteration": model.best_iteration or model.current_iteration(),
            "threshold_curve_tune": dict(zip(map(float, grid), map(float, curve))),
            "val": res, "train_time_s": t_train, "total_time_s": time.time() - t0,
