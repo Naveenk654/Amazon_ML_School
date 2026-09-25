@@ -61,7 +61,14 @@ def main() -> None:
     oof = [np.zeros(len(r), np.float32) for r in s1r]
     params = ModelConfig().params
     for k in range(a.folds):
-        Xtr = np.vstack([X[f != k] for X, f in zip(Xs, folds)])
+        n = sum(int((f != k).sum()) for f in folds)
+        Xtr = np.empty((n, Xs[0].shape[1]), np.float32)  # preallocated: no vstack copy
+        lo = 0
+        for X, f in zip(Xs, folds):
+            b = X[f != k]
+            Xtr[lo:lo + len(b)] = b
+            lo += len(b)
+            del b
         ytr = np.concatenate([y[f != k] for y, f in zip(ys, folds)])
         m = lgb.train(params, lgb.Dataset(Xtr, label=ytr, feature_name=cols), num_boost_round=rounds)
         del Xtr, ytr
