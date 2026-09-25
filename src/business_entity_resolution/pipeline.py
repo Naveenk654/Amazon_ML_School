@@ -205,14 +205,16 @@ def cmd_predict(args) -> None:
     and the stage-3 input rows. Phase B (fresh process, for memory): cross-S1
     competition features over ALL pairs -> M3 -> submission files.
     """
-    if args.phase in ("all", "A"):
-        predict_phase_a(args)
     if args.phase == "all":
+        # each phase in its own process: phase B must not share memory with phase A
         import subprocess
         import sys
-        subprocess.run([sys.executable, "-m", "business_entity_resolution.pipeline", "predict", "--phase", "B"],
-                       check=True)
-    elif args.phase == "B":
+        for ph in ("A", "B"):
+            subprocess.run([sys.executable, "-m", "business_entity_resolution.pipeline", "predict",
+                            "--phase", ph, "--batch", str(args.batch)], check=True)
+    elif args.phase == "A":
+        predict_phase_a(args)
+    else:
         predict_phase_b(args)
 
 
