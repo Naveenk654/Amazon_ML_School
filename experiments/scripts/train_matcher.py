@@ -19,6 +19,7 @@ import time
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from business_entity_resolution import evaluate as ev
 from business_entity_resolution.config import ModelConfig, ValidationConfig, work_dir
@@ -28,18 +29,46 @@ from business_entity_resolution.pipeline import make_roles
 log = logging.getLogger("train_matcher")
 
 
-def load_role(d, keep_s1=None):
-    cands, Xs = [], []
-    for cf in sorted(glob.glob(f"{d}/cand_*.parquet")):
+def load_role(d, keep_s1=None, extra=(), min_p1=None, drop_prefix=None):
+    """Load cand + features into one preallocated float32 array (no vstack copy).
+
+    `extra` = shard prefixes appended column-wise (e.g. 'S_' sibling features).
+    """
+    files = sorted(glob.glob(f"{d}/cand_*.parquet"))
+    cands, masks = [], []
+    for cf in files:
         c = pd.read_parquet(cf, columns=["s1_row", "t_row", "y"])
-        X = pd.read_parquet(cf.replace("cand_", "X_"))
-        if keep_s1 is not None:
-            m = np.isin(c["s1_row"].to_numpy(), keep_s1)
-            c, X = c[m], X[m]
-        cands.append(c.reset_index(drop=True))
-        Xs.append(X.to_numpy(np.float32))
-        cols = list(X.columns)
-    return pd.concat(cands, ignore_index=True), np.vstack(Xs), cols
+        m = np.isin(c["s1_row"].to_numpy(), keep_s1) if keep_s1 is not None else np.ones(len(c), bool)
+        if min_p1 is not None:  # cascade: stage 2 only sees candidates with p1 >= min_p1
+            m &= pd.read_parquet(cf.replace("cand_", "p1_"))["p1"].to_numpy() >= min_p1
+        cands.append(c[m].reset_index(drop=True))
+        masks.append(m)
+    cols = list(pq.ParquetFile(files[0].replace("cand_", "X_")).schema_arrow.names)
+    for pre in extra:
+        cols += list(pq.ParquetFile(files[0].replace("cand_", pre)).schema_arrow.names)
+    keep_c = [i for i, c in enumerate(cols) if not (drop_prefix and c.startswith(drop_prefix))]
+    cols = [cols[i] for i in keep_c]
+    out = np.empty((sum(int(m.sum()) for m in masks), len(cols)), np.float32)
+    lo = 0
+    for cf, m in zip(files, masks):
+        parts = [pd.read_parquet(cf.replace("cand_", "X_"))]
+        parts += [pd.read_parquet(cf.replace("cand_", pre)) for pre in extra]
+        blk = np.hstack([x.to_numpy(np.float32) for x in parts])[m][:, keep_c]
+        out[lo:lo + len(blk)] = blk
+        lo += len(blk)
+        del parts, blk
+    return pd.concat(cands, ignore_index=True), out, cols
+
+
+def cascade_predict(model, X, p1, min_p1):
+    """Stage-2 score where p1 >= min_p1; below the cutoff the stage-1 score is kept."""
+    it = model.best_iteration or None
+    if p1 is None:
+        return model.predict(X, num_iteration=it)
+    s = p1.astype(np.float64).copy()
+    m = p1 >= min_p1
+    s[m] = model.predict(X[m], num_iteration=it)
+    return s
 
 
 def f05_report(c, score, thr, truth, ids, singles):
@@ -64,6 +93,10 @@ def main() -> None:
     ap.add_argument("--n-train-s1", type=int, default=None, help="use EXP001's first N train S1")
     ap.add_argument("--fixed-rounds", type=int, default=None, help="no early stopping")
     ap.add_argument("--max-rounds", type=int, default=3000)
+    ap.add_argument("--extra", nargs="*", default=[], help="extra shard prefixes, e.g. S_")
+    ap.add_argument("--min-p1", type=float, default=None,
+                    help="cascade: rescore only candidates with stage-1 p1 >= this; others keep p1")
+    ap.add_argument("--drop-prefix", default=None, help="drop feature columns with this prefix (ablation)")
     a = ap.parse_args()
     t0 = time.time()
     wd = work_dir()
@@ -80,8 +113,11 @@ def main() -> None:
     del gt
 
     keep = np.sort(roles["train"]) if a.n_train_s1 else None
-    ctr, Xtr, cols = load_role(base / "train", keep)
-    ctu, Xtu, _ = load_role(base / "tune")
+    ctr, Xtr, cols = load_role(base / "train", keep, a.extra, a.min_p1, a.drop_prefix)
+    ctu, Xtu, _ = load_role(base / "tune", extra=a.extra, drop_prefix=a.drop_prefix)
+    if a.min_p1 is not None:
+        p1_tu = np.concatenate([pd.read_parquet(f.replace("cand_", "p1_"))["p1"].to_numpy()
+                                for f in sorted(glob.glob(f"{base / 'tune'}/cand_*.parquet"))])
     log.info("train pairs %d (S1 %d), tune pairs %d", len(ctr), ctr["s1_row"].nunique(), len(ctu))
 
     mcfg = ModelConfig()
@@ -90,7 +126,8 @@ def main() -> None:
     if a.fixed_rounds:
         model = lgb.train(mcfg.params, dtr, num_boost_round=a.fixed_rounds)
     else:
-        dtu = lgb.Dataset(Xtu, label=ctu["y"].to_numpy(), reference=dtr)
+        es = p1_tu >= a.min_p1 if a.min_p1 is not None else slice(None)
+        dtu = lgb.Dataset(Xtu[es], label=ctu["y"].to_numpy()[es], reference=dtr)
         model = lgb.train(mcfg.params, dtr, num_boost_round=a.max_rounds, valid_sets=[dtu],
                           callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(100)])
     t_train = time.time() - t1
@@ -99,7 +136,7 @@ def main() -> None:
     # threshold on tune (macro F0.5 incl. singletons)
     tune_ids = np.sort(roles["tune"])
     truth_tu = ev.as_sets(gtr[np.isin(gs, tune_ids)], "s1_row", "t_row")
-    s_tu = model.predict(Xtu, num_iteration=model.best_iteration or None)
+    s_tu = cascade_predict(model, Xtu, p1_tu if a.min_p1 is not None else None, a.min_p1)
     grid = np.round(np.arange(0.30, 0.901, 0.025), 3)
     curve = []
     for t in grid:
@@ -108,10 +145,13 @@ def main() -> None:
     thr = float(grid[int(np.argmax(curve))])
     del Xtu
 
-    cva, Xva, _ = load_role(base / "val")
+    cva, Xva, _ = load_role(base / "val", extra=a.extra, drop_prefix=a.drop_prefix)
     val_ids = np.sort(roles["val"])
     truth_va = ev.as_sets(gtr[np.isin(gs, val_ids)], "s1_row", "t_row")
-    s_va = model.predict(Xva, num_iteration=model.best_iteration or None)
+    p1_va = np.concatenate([pd.read_parquet(f.replace("cand_", "p1_"))["p1"].to_numpy()
+                            for f in sorted(glob.glob(f"{base / 'val'}/cand_*.parquet"))]) \
+        if a.min_p1 is not None else None
+    s_va = cascade_predict(model, Xva, p1_va, a.min_p1)
     singles = np.array([s not in truth_va for s in val_ids])
     res = f05_report(cva, s_va, thr, truth_va, val_ids, singles)
     country = s1["country"].to_numpy()[val_ids]
@@ -124,7 +164,7 @@ def main() -> None:
     res["ceiling"] = ev.macro_f05(ev.as_sets(cva[cva["y"] == 1], "s1_row", "t_row"), truth_va, val_ids)
 
     imp = pd.Series(model.feature_importance("gain"), index=model.feature_name())
-    out = {"name": a.name, "blocking": a.blocking, "n_train_s1": int(len(keep) if keep is not None else len(roles["train"])),
+    out = {"name": a.name, "blocking": a.blocking, "extra": a.extra, "min_p1": a.min_p1, "drop_prefix": a.drop_prefix, "n_train_s1": int(len(keep) if keep is not None else len(roles["train"])),
            "best_iteration": model.best_iteration or model.current_iteration(),
            "threshold_curve_tune": dict(zip(map(float, grid), map(float, curve))),
            "val": res, "train_time_s": t_train, "total_time_s": time.time() - t0,
