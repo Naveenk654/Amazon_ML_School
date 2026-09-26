@@ -4,8 +4,9 @@
 
 Seeds come from seed_XXX.parquet (see seed_scores.py): out-of-fold M2 for
 train, frozen M2 for tune/val. Seeds are pairs with seed >= the M2 threshold.
-Writes matcher_data/CE/<role>/cand_XXX.parquet + X_XXX.parquet (features
-recomputed over the enlarged candidate set, as at inference).
+Writes matcher_data/CE<variant>/<role>/cand_XXX.parquet + X_XXX.parquet (features
+recomputed over the enlarged candidate set, as at inference). With BER_VARIANT=X
+(M5-EMB) the top-k embedding neighbours are added after expansion, as in stack.score_batch.
 """
 from __future__ import annotations
 
@@ -20,11 +21,13 @@ import numpy as np
 import pandas as pd
 
 from business_entity_resolution.blocking import Blocker
-from business_entity_resolution.config import BlockingConfig, work_dir
+from business_entity_resolution.config import BlockingConfig, variant, work_dir
 from business_entity_resolution.data import load_ground_truth
+from business_entity_resolution.emb import EmbKnn, add_emb
 from business_entity_resolution.expansion import KEY, expand
 from business_entity_resolution.features import build_features
 from business_entity_resolution.pipeline import key_freqs, prepared
+from business_entity_resolution.stack import EMB_K
 
 
 def main() -> None:
@@ -36,7 +39,8 @@ def main() -> None:
     t0 = time.time()
     wd = work_dir()
     thr = json.loads((wd / "exp" / "M2.json").read_text())["val"]["threshold"]
-    src, dst = wd / "matcher_data" / "C" / a.role, wd / "matcher_data" / "CE" / a.role
+    src, dst = wd / "matcher_data" / "C" / a.role, wd / "matcher_data" / f"CE{variant()}" / a.role
+    emb_k = EMB_K.get(variant(), 0)
     dst.mkdir(parents=True, exist_ok=True)
     s1, tg = prepared("train")
     s1f, tf = key_freqs(s1, tg)
@@ -45,7 +49,7 @@ def main() -> None:
                        pd.Index(tg["entity_id"]).get_indexer(gt["t_id"])))
     del gt
     blocker = Blocker(tg, BlockingConfig(hybrid=True))
-    stats = {"new_pairs": 0, "new_true": 0, "c_pairs": 0}
+    stats = {"new_pairs": 0, "new_true": 0, "c_pairs": 0, "emb_k": emb_k, "emb_pairs": 0, "emb_true": 0}
     for cf in sorted(glob.glob(f"{src}/cand_*.parquet")):
         c = pd.read_parquet(cf)
         seed = pd.read_parquet(cf.replace("cand_", "seed_"))["seed"].to_numpy()
@@ -58,6 +62,12 @@ def main() -> None:
         e = pd.concat([c, new[c.columns]], ignore_index=True)
         e["x_expand"] = np.r_[np.zeros(len(c), bool), np.ones(len(new), bool)]
         e = e.sort_values(["s1_row", "t_row"], kind="stable").reset_index(drop=True)
+        if emb_k:
+            rows = np.unique(c["s1_row"].to_numpy())
+            e = add_emb(blocker, s1, tg, e, EmbKnn("train", rows), rows, emb_k)
+            e["y"] = np.isin(KEY(e["s1_row"], e["t_row"]), gkey).astype(np.int8)
+            stats["emb_pairs"] += int(e["x_emb"].sum())
+            stats["emb_true"] += int(e.loc[e["x_emb"], "y"].sum())
         X = build_features(e, s1, tg, s1f, tf)
         name = cf.rsplit("/", 1)[1]
         e.to_parquet(dst / name, index=False)

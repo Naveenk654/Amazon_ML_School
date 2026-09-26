@@ -18,7 +18,7 @@ import time
 import numpy as np
 import pandas as pd
 
-from business_entity_resolution.config import work_dir
+from business_entity_resolution.config import variant, work_dir
 
 STRONG = 0.5
 
@@ -27,7 +27,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     t0 = time.time()
     wd = work_dir()
-    base = wd / "matcher_data" / "CE"
+    base = wd / "matcher_data" / f"CE{variant()}"
     parts, owners = [], []  # owners: (role, shard file, n rows) for scattering back
     for role in ("train", "tune", "val"):
         for cf in sorted(glob.glob(f"{base}/{role}/cand_*.parquet")):
@@ -35,7 +35,7 @@ def main() -> None:
             c["s2"] = pd.read_parquet(cf.replace("cand_", "s2_"))["seed"].to_numpy()
             parts.append(c)
             owners.append((cf, len(c)))
-    for pf in sorted(glob.glob(str(wd / "stack" / "rest" / "part_*.parquet"))):
+    for pf in sorted(glob.glob(str(wd / "stack" / f"rest{variant()}" / "part_*.parquet"))):
         parts.append(pd.read_parquet(pf, columns=["s1_row", "t_row", "cos_name", "cos_addr", "s2"]))
         owners.append((None, len(parts[-1])))
     P = pd.concat(parts, ignore_index=True)

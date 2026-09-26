@@ -31,6 +31,12 @@ def models_dir() -> Path:
     return Path(os.environ.get("BER_MODELS", REPO_ROOT / "models"))
 
 
+def variant() -> str:
+    """Experimental stack variant suffix (BER_VARIANT, e.g. "X" = M5-EMB): selects
+    matcher_data/CE<v>, stack/rest<v> and models M1bE<v>/M2E<v>/M3<v>. Empty = production."""
+    return os.environ.get("BER_VARIANT", "")
+
+
 def out_dir() -> Path:
     p = Path(os.environ.get("BER_OUT", REPO_ROOT / "output"))
     p.mkdir(parents=True, exist_ok=True)

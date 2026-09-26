@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from business_entity_resolution.blocking import Blocker
-from business_entity_resolution.config import BlockingConfig, ValidationConfig, work_dir
+from business_entity_resolution.config import BlockingConfig, ValidationConfig, variant, work_dir
 from business_entity_resolution.data import assign_folds, load_ground_truth
 from business_entity_resolution.expansion import KEY
 from business_entity_resolution.pipeline import key_freqs, make_roles, prepared
@@ -34,7 +34,7 @@ def main() -> None:
     a = ap.parse_args()
     t0 = time.time()
     wd = work_dir()
-    out = wd / "stack" / a.role
+    out = wd / "stack" / f"{a.role}{variant()}"
     out.mkdir(parents=True, exist_ok=True)
     s1, tg = prepared("train")
     s1f, tf = key_freqs(s1, tg)

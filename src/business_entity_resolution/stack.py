@@ -21,11 +21,14 @@ import pandas as pd
 
 from .blocking import Blocker
 from .competition import competition_features
+from .config import variant
+from .emb import EmbKnn, add_emb
 from .expansion import KEY, expand
 from .features import build_features
 from .siblings import sibling_features
 
 log = logging.getLogger(__name__)
+EMB_K = {"X": 5}  # variant -> embedding neighbours added per S1
 
 
 @dataclass
@@ -43,6 +46,7 @@ class StackModels:
     m3: lgb.Booster | None = None
     m3_cut: float = 0.0
     m3_thr: float = 0.0
+    emb_k: int = 0          # M5-EMB: top-k embedding neighbours added per S1 (0 = off)
 
     @classmethod
     def load_dir(cls, d: Path) -> "StackModels":
@@ -52,17 +56,20 @@ class StackModels:
         return cls(b("M1b"), meta["M1b"]["best_iteration"], b("M2"), meta["M2"]["cascade"],
                    meta["M2"]["threshold"], b("M1bE"), meta["M1bE"]["best_iteration"],
                    b("M2E"), meta["M2E"]["cascade"], meta["M2E"]["threshold"],
-                   b("M3"), meta["M3"]["cascade"], meta["M3"]["threshold"])
+                   b("M3"), meta["M3"]["cascade"], meta["M3"]["threshold"], meta.get("emb_k", 0))
 
     @classmethod
-    def load(cls, work: Path) -> "StackModels":
+    def load(cls, work: Path, v: str | None = None) -> "StackModels":
+        """Experiment models from work/models + work/exp; v = variant suffix (default BER_VARIANT)."""
+        v = variant() if v is None else v
         j = lambda n: json.loads((work / "exp" / f"{n}.json").read_text())
         b = lambda n: lgb.Booster(model_file=str(work / "models" / f"{n}.txt"))
-        m3 = (b("M3"), j("M3")["min_p1"], j("M3")["val"]["threshold"]) \
-            if (work / "models" / "M3.txt").exists() else (None, 0.0, 0.0)
+        m3 = (b(f"M3{v}"), j(f"M3{v}")["min_p1"], j(f"M3{v}")["val"]["threshold"]) \
+            if (work / "models" / f"M3{v}.txt").exists() else (None, 0.0, 0.0)
         return cls(b("M1b"), int(j("M1b")["best_iteration"]), b("M2"), j("M2")["min_p1"],
-                   j("M2")["val"]["threshold"], b("M1bE"), int(j("M1bE")["best_iteration"]),
-                   b("M2E"), j("M2E")["min_p1"], j("M2E")["val"]["threshold"], *m3)
+                   j("M2")["val"]["threshold"], b(f"M1bE{v}"), int(j(f"M1bE{v}")["best_iteration"]),
+                   b(f"M2E{v}"), j(f"M2E{v}")["min_p1"], j(f"M2E{v}")["val"]["threshold"], *m3,
+                   EMB_K.get(v, 0))
 
 
 def _stage(cand, s1, tg, s1f, tf, m1, it1, m2, cut, keep_min=None):
@@ -93,10 +100,11 @@ def _stage(cand, s1, tg, s1f, tf, m1, it1, m2, cut, keep_min=None):
 
 
 def score_batch(blocker: Blocker, s1, tg, s1f, tf, rows: np.ndarray, M: StackModels, k: int = 5,
-                stage3: bool = False):
+                stage3: bool = False, split: str = "train"):
     """Return the final enlarged candidate frame for S1 `rows` with column s2.
 
     stage3=True also returns the stage-3 input rows (see _stage).
+    With M.emb_k > 0 the top-k embedding neighbours of `split` are added after expansion.
     """
     c = blocker.candidates(s1.iloc[rows])
     c["s1_row"] = rows[c["s1_row"].to_numpy()]
@@ -106,6 +114,8 @@ def score_batch(blocker: Blocker, s1, tg, s1f, tf, rows: np.ndarray, M: StackMod
     e = pd.concat([c, new[c.columns]], ignore_index=True)
     e["x_expand"] = np.r_[np.zeros(len(c), bool), np.ones(len(new), bool)]
     e = e.sort_values(["s1_row", "t_row"], kind="stable").reset_index(drop=True)
+    if M.emb_k:
+        e = add_emb(blocker, s1, tg, e, EmbKnn(split, rows), rows, M.emb_k)
     if not stage3:
         e["s2"] = _stage(e, s1, tg, s1f, tf, M.m1be, M.m1be_iter, M.m2e, M.m2e_cut).astype(np.float32)
         return e

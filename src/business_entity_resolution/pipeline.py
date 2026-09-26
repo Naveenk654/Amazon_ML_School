@@ -243,7 +243,8 @@ def predict_phase_a(args) -> None:
     rows_all = np.arange(len(s1))
     n_pairs = 0
     for i, lo in enumerate(range(0, len(s1), args.batch)):
-        e, keep = score_batch(blocker, s1, tg, s1f, tf, rows_all[lo:lo + args.batch], M, stage3=True)
+        e, keep = score_batch(blocker, s1, tg, s1f, tf, rows_all[lo:lo + args.batch], M, stage3=True,
+                              split="test")
         e[P_COLS].to_parquet(d / f"P_{i:03d}.parquet", index=False)
         keep.to_parquet(d / f"XS3_{i:03d}.parquet", index=False)
         n_pairs += len(e)

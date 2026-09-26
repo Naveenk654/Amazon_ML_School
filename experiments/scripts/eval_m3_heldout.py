@@ -22,7 +22,7 @@ import pandas as pd
 
 from business_entity_resolution import evaluate as ev
 from business_entity_resolution.blocking import Blocker
-from business_entity_resolution.config import BlockingConfig, ValidationConfig, work_dir
+from business_entity_resolution.config import BlockingConfig, ValidationConfig, variant, work_dir
 from business_entity_resolution.data import assign_folds, load_ground_truth
 from business_entity_resolution.expansion import KEY
 from business_entity_resolution.pipeline import key_freqs, make_roles, prepared
@@ -51,7 +51,7 @@ def main() -> None:
     a = ap.parse_args()
     t0 = time.time()
     wd = work_dir()
-    out = wd / "heldout" / a.role
+    out = wd / "heldout" / f"{a.role}{variant()}"
     out.mkdir(parents=True, exist_ok=True)
     M = StackModels.load(wd)
     if a.m3_name:  # evaluate a candidate M3 variant (work/models/<name>.txt)
@@ -83,12 +83,12 @@ def main() -> None:
     for role in ("train", "tune", "val"):
         if role == a.role:
             continue
-        for cf in sorted(glob.glob(str(wd / "matcher_data" / "CE" / role / "cand_*.parquet"))):
+        for cf in sorted(glob.glob(str(wd / "matcher_data" / f"CE{variant()}" / role / "cand_*.parquet"))):
             c = pd.read_parquet(cf, columns=["s1_row", "t_row", "cos_name", "cos_addr"])
             c["s2"] = pd.read_parquet(cf.replace("cand_", "s2_"))["seed"].to_numpy()
             others.append(c[P_COLS])
     if a.role != "rest":
-        others += [pd.read_parquet(f, columns=P_COLS) for f in sorted(glob.glob(str(wd / "stack" / "rest" / "part_*.parquet")))]
+        others += [pd.read_parquet(f, columns=P_COLS) for f in sorted(glob.glob(str(wd / "stack" / f"rest{variant()}" / "part_*.parquet")))]
     P = pd.concat(own + others, ignore_index=True)
     del others
     offs = np.r_[0, np.cumsum(n_own)]

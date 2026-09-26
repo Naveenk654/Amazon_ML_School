@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from business_entity_resolution.competition import competition_features
-from business_entity_resolution.config import SEED, work_dir
+from business_entity_resolution.config import variant, SEED, work_dir
 
 
 def main() -> None:
@@ -33,7 +33,7 @@ def main() -> None:
     a = ap.parse_args()
     t0 = time.time()
     wd = work_dir()
-    base = wd / "matcher_data" / "CE"
+    base = wd / "matcher_data" / f"CE{variant()}"
     files, parts = [], []
     for role in ("train", "tune", "val"):
         for cf in sorted(glob.glob(f"{base}/{role}/cand_*.parquet")):
@@ -42,7 +42,7 @@ def main() -> None:
             files.append((role, cf, len(c)))
             parts.append(c)
     parts += [pd.read_parquet(f, columns=["s1_row", "t_row", "cos_name", "cos_addr", "s2"])
-              for f in sorted(glob.glob(str(wd / "stack" / "rest" / "part_*.parquet")))]
+              for f in sorted(glob.glob(str(wd / "stack" / f"rest{variant()}" / "part_*.parquet")))]
     P = pd.concat(parts, ignore_index=True)
     del parts
     s1r = P["s1_row"].to_numpy()

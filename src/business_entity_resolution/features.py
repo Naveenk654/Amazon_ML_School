@@ -14,6 +14,8 @@ from rapidfuzz.distance import JaroWinkler
 from .blocking import PASSES
 from .config import N_JOBS
 
+EMB_COLS = ["emb_cos", "emb_rank", "emb_top1", "emb_gap", "emb_kth", "x_emb"]
+
 
 def _string_feats(args):
     n1f, n2f, n1c, n2c, k1, k2, a1, a2, u1, u2 = args
@@ -97,4 +99,7 @@ def build_features(cand: pd.DataFrame, s1: pd.DataFrame, tg: pd.DataFrame,
         F[f"{c}_gap_to_max"] = (s.groupby(g).transform("max") - s).to_numpy()
     F["cos_sum"] = F["cos_name"] + F["cos_addr"]
     F["cos_sum_grp_rank"] = F["cos_sum"].groupby(g.to_numpy()).rank(ascending=False, method="min").to_numpy()
+    for c in EMB_COLS:  # embedding-retrieval features, when the candidate frame carries them (M5-EMB)
+        if c in cand.columns:
+            F[c] = cand[c].to_numpy().astype(np.float32)
     return F.astype(np.float32)

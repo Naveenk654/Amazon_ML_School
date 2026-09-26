@@ -36,14 +36,31 @@ def expand(blocker: Blocker, s1: pd.DataFrame, tg: pd.DataFrame, seeds: pd.DataF
         new = new[~np.isin(KEY(new["s1_row"], new["t_row"]), exclude)]
         if new.empty:
             continue
-        loc = pd.Series(np.arange(len(m["idx"])), index=m["idx"])
-        us = np.unique(new["s1_row"].to_numpy())
-        qs = s1.iloc[us]
-        qi = pd.Series(np.arange(len(us)), index=us).reindex(new["s1_row"]).to_numpy()
-        tj = loc.reindex(new["t_row"]).to_numpy()
-        new["cos_name"] = pair_cosine(m["name"].transform(name_doc(qs)), m["name"].T, qi, tj)
-        new["cos_addr"] = pair_cosine(m["addr"].transform(addr_doc(qs)), m["addr"].T, qi, tj)
-        out.append(new)
+        out.append(_cosines(m, s1, new))
+    return _blocking_schema(out)
+
+
+def _cosines(m: dict, s1: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
+    """Add the name/address blocking cosines for (s1_row, t_row) pairs of one country."""
+    loc = pd.Series(np.arange(len(m["idx"])), index=m["idx"])
+    us = np.unique(new["s1_row"].to_numpy())
+    qs = s1.iloc[us]
+    qi = pd.Series(np.arange(len(us)), index=us).reindex(new["s1_row"]).to_numpy()
+    tj = loc.reindex(new["t_row"]).to_numpy()
+    new = new.copy()
+    new["cos_name"] = pair_cosine(m["name"].transform(name_doc(qs)), m["name"].T, qi, tj)
+    new["cos_addr"] = pair_cosine(m["addr"].transform(addr_doc(qs)), m["addr"].T, qi, tj)
+    return new
+
+
+def with_cosines(blocker: Blocker, s1: pd.DataFrame, tg: pd.DataFrame, pairs: pd.DataFrame) -> pd.DataFrame:
+    """New candidate pairs from any source -> blocking-output schema with both cosines."""
+    cty = tg["country"].to_numpy()[pairs["t_row"].to_numpy()]
+    out = [_cosines(m, s1, pairs[cty == c]) for c, m in blocker.by_country.items() if (cty == c).any()]
+    return _blocking_schema(out)
+
+
+def _blocking_schema(out: list) -> pd.DataFrame:
     cols = ["s1_row", "t_row", *PASSES, *EXTRA_PASSES, *[f"rank_{p}" for p in PASSES], "cos_name", "cos_addr"]
     if not out:
         return pd.DataFrame(columns=cols)
