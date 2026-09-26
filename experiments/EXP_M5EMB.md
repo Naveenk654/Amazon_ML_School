@@ -51,6 +51,12 @@ only recall from new candidates: precision also rises and FP fall by 17%.
 - `stage1_scores.py`: shards are read per fold instead of all at once. Peak 12.2 → 7.6 GB.
 - The rest population is scored in 60k-S1 batches (the test batch size) instead of 150k.
 
-## Pending
-- Held-out ("rest", 532k S1) evaluation: to run after test inference.
-- Leaderboard checkpoint: candidate files in `$S/candidates/M5EMB/`.
+## Held-out ("rest", 532,720 S1, never trained on)
+| | M3OR | **M5-EMB** |
+|---|---|---|
+| macro F0.5 | 0.95797 | **0.97174** |
+| India / US | 0.9414 / 0.9691 | **0.9618 / 0.9784** |
+| blocking recall | — | 0.9683 |
+
+## Leaderboard
+**0.936** (M3OR 0.925), so +0.011 of the +0.014 local gain carried over. Promoted to production.

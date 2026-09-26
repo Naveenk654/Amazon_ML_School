@@ -6,7 +6,7 @@
 | 2 | M3 (C + M2 siblings + expansion retrain + competition) | 0.95871 | 0.95831 | 0.922 | 424e0bb1… |
 | 3 | M3OR (M3 with 19% competitor-dropout training) | 0.95837 | 0.95797 | 0.925 | 063210cd… |
 | — | probe: M3OR with France predictions blanked (diagnostic only) | — | — | 0.797 | — |
-| 4 | **M5-EMB** (M3OR stack + multilingual-e5-small top-5 candidates + embedding features) | 0.97263 | pending | **0.936** | 774d041f… |
+| 4 | **M5-EMB** (M3OR stack + multilingual-e5-small top-5 candidates + embedding features) | 0.97263 | 0.97174 | **0.936** | 774d041f… |
 
 Notes:
 - M3OR was slightly worse on normal validation (−0.0003) but better under simulated
