@@ -37,7 +37,9 @@ export BER_DATA=/path/to/dataset          # contains train/ and test/ TSVs (not 
 export BER_WORK=/path/to/cache            # normalized parquet + inference staging
 export PYTHONPATH=src
 
-python -m business_entity_resolution.pipeline predict      # phase A + B -> output/*.tsv
+# production (M5-EMB) first needs the embedding neighbour lists in $BER_WORK/emb/
+# (test_knn.parquet, test_s1_ids.parquet, test_t_ids.parquet) from experiments/modal/emb_full.py (GPU)
+python -m business_entity_resolution.pipeline predict --batch 40000   # phase A + B -> output/*.tsv
 python3 utils/validate_submission.py --matching output/matching_results.tsv \
     --candidate output/candidate_pairs.tsv --test-dir $BER_DATA/test --check-ids
 ```
