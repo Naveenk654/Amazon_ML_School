@@ -53,7 +53,7 @@ def main() -> None:
     files = shards(base / "train")
     s1r = [pd.read_parquet(f, columns=["s1_row"])["s1_row"].to_numpy() for f in files]
     ys = [pd.read_parquet(f, columns=["y"])["y"].to_numpy() for f in files]
-    Xs = [pd.read_parquet(f.replace("cand_", "X_")).to_numpy(np.float32) for f in files]
+    readx = lambda f: pd.read_parquet(f.replace("cand_", "X_")).to_numpy(np.float32)  # per fold: bounded memory
     cols = list(pd.read_parquet(files[0].replace("cand_", "X_")).columns)
     uniq = np.unique(np.concatenate(s1r))
     fold_of = pd.Series(np.random.default_rng(SEED + 1).integers(0, a.folds, len(uniq)), index=uniq)
@@ -62,19 +62,22 @@ def main() -> None:
     params = ModelConfig().params
     for k in range(a.folds):
         n = sum(int((f != k).sum()) for f in folds)
-        Xtr = np.empty((n, Xs[0].shape[1]), np.float32)  # preallocated: no vstack copy
+        Xtr = np.empty((n, len(cols)), np.float32)  # preallocated: no vstack copy
         lo = 0
-        for X, f in zip(Xs, folds):
-            b = X[f != k]
+        for fn, f in zip(files, folds):
+            b = readx(fn)[f != k]
             Xtr[lo:lo + len(b)] = b
             lo += len(b)
             del b
         ytr = np.concatenate([y[f != k] for y, f in zip(ys, folds)])
-        m = lgb.train(params, lgb.Dataset(Xtr, label=ytr, feature_name=cols), num_boost_round=rounds)
+        d = lgb.Dataset(Xtr, label=ytr, feature_name=cols)
+        d.construct()
         del Xtr, ytr
-        for i, (X, f) in enumerate(zip(Xs, folds)):
+        m = lgb.train(params, d, num_boost_round=rounds)
+        del d
+        for i, (fn, f) in enumerate(zip(files, folds)):
             if (f == k).any():
-                oof[i][f == k] = m.predict(X[f == k])
+                oof[i][f == k] = m.predict(readx(fn)[f == k])
         log.info("fold %d done (%.0fs)", k, time.time() - t0)
     for f, p in zip(files, oof):
         pd.DataFrame({"p1": p}).to_parquet(f.replace("cand_", "p1_"), index=False)

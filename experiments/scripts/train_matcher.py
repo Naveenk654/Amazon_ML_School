@@ -132,6 +132,8 @@ def main() -> None:
 
     mcfg = ModelConfig()
     dtr = lgb.Dataset(Xtr, label=ctr["y"].to_numpy(), feature_name=cols, free_raw_data=True)
+    dtr.construct()  # bin now, then drop the raw float32 matrix (the largest allocation)
+    del Xtr
     t1 = time.time()
     if a.fixed_rounds:
         model = lgb.train(mcfg.params, dtr, num_boost_round=a.fixed_rounds)
@@ -141,7 +143,7 @@ def main() -> None:
         model = lgb.train(mcfg.params, dtr, num_boost_round=a.max_rounds, valid_sets=[dtu],
                           callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(100)])
     t_train = time.time() - t1
-    del dtr, Xtr, ctr
+    del dtr, ctr
 
     # threshold on tune (macro F0.5 incl. singletons)
     tune_ids = np.sort(roles["tune"])
